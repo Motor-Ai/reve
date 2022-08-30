@@ -18,6 +18,7 @@
 
 #include <random>
 #include <algorithm>
+#include <string>
 
 #include <angles/angles.h>
 
@@ -136,6 +137,8 @@ bool RadarEgoVelocityEstimator::estimate(const sensor_msgs::PointCloud2& radar_s
 
     if (valid_targets.size() > 2)
     {
+      ROS_INFO_STREAM_THROTTLE(0.5, kPrefix << "Valid points more than 2");
+
       // check for zero velocity
       std::vector<Real> v_dopplers;
       for (const auto& v : valid_targets) v_dopplers.emplace_back(std::fabs(v[idx_.v_d]));
@@ -173,6 +176,11 @@ bool RadarEgoVelocityEstimator::estimate(const sensor_msgs::PointCloud2& radar_s
           std::vector<uint> inlier_idx_best;
           success = solve3DLsqRansac(radar_data, v_r, P_v_r, inlier_idx_best);
 
+          if (success)
+            ROS_INFO_STREAM_THROTTLE(0.5, kPrefix << "LSQ Ransac successful");
+          else
+            ROS_INFO_STREAM_THROTTLE(0.5, kPrefix << "LSQ Ransac failed");
+
           for (const auto& idx : inlier_idx_best)
             radar_scan_inlier.push_back(toRadarPointCloudType(valid_targets.at(idx), idx_));
 
@@ -196,6 +204,8 @@ bool RadarEgoVelocityEstimator::estimate(const sensor_msgs::PointCloud2& radar_s
           }
         }
       }
+    }else{
+      ROS_INFO_STREAM_THROTTLE(0.5, kPrefix << "Valid points less than 2");
     }
   }
 
@@ -230,6 +240,8 @@ bool RadarEgoVelocityEstimator::solve3DLsqRansac(const Matrix& radar_data,
 
       if (solve3DLsq(radar_data_iter, v_r, P_v_r, false))
       {
+        ROS_INFO_STREAM_THROTTLE(0.5, kPrefix << "solve3DLsq successful");
+
         const Vector err = (y_all - H_all * v_r).array().abs();
         std::vector<uint> inlier_idx;
         for (uint j = 0; j < err.rows(); ++j)
@@ -237,16 +249,21 @@ bool RadarEgoVelocityEstimator::solve3DLsqRansac(const Matrix& radar_data,
             inlier_idx.emplace_back(j);
         if (inlier_idx.size() > inlier_idx_best.size())
           inlier_idx_best = inlier_idx;
+      }else{
+        ROS_INFO_STREAM_THROTTLE(0.5, kPrefix << "solve3DLsq failed");
       }
     }
   }
 
   if (!inlier_idx_best.empty())
   {
+    ROS_INFO_STREAM_THROTTLE(0.5, kPrefix << "best inlier not empty failed");
     Matrix radar_data_inlier(inlier_idx_best.size(), 4);
     for (uint i = 0; i < inlier_idx_best.size(); ++i) radar_data_inlier.row(i) = radar_data.row(inlier_idx_best.at(i));
 
     return solve3DLsq(radar_data_inlier, v_r, P_v_r, true);
+  }else{
+    ROS_INFO_STREAM_THROTTLE(0.5, kPrefix << "best inlier empty failed");
   }
 
   return false;
@@ -265,8 +282,10 @@ bool RadarEgoVelocityEstimator::solve3DLsq(const Matrix& radar_data, Vector3& v_
   Eigen::JacobiSVD<Matrix> svd(HTH);
   Real cond = svd.singularValues()(0) / svd.singularValues()(svd.singularValues().size() - 1);
 
-  if (std::fabs(cond) < 1.0e3)
+  if (std::fabs(cond) < config_.max_r_cond)
   {
+    ROS_INFO_STREAM_THROTTLE(0.5, kPrefix << "lsq cond succ" << std::to_string(cond));
+
     if (config_.use_cholesky_instead_of_bdcsvd)
       v_r = (HTH).ldlt().solve(H.transpose() * y);
     else
@@ -274,6 +293,7 @@ bool RadarEgoVelocityEstimator::solve3DLsq(const Matrix& radar_data, Vector3& v_
 
     if (estimate_sigma)
     {
+      ROS_INFO_STREAM_THROTTLE(0.5, kPrefix << "lsq est sigma");
       const Vector e    = H * v_r - y;
       P_v_r             = (e.transpose() * e).x() * (HTH).inverse() / (H.rows() - 3);
       Vector3 sigma_v_r = Vector3(P_v_r(0, 0), P_v_r(1, 1), P_v_r(2, 2));
@@ -287,16 +307,21 @@ bool RadarEgoVelocityEstimator::solve3DLsq(const Matrix& radar_data, Vector3& v_
       // check diagonal for valid estimation result
       if (sigma_v_r.x() >= 0.0 && sigma_v_r.y() >= 0.0 && sigma_v_r.z() >= 0.)
       {
+        ROS_INFO_STREAM_THROTTLE(0.5, kPrefix << "lsq sigma cond succ");
         sigma_v_r = sigma_v_r.array().sqrt();
         if (sigma_v_r.x() < config_.max_sigma_x && sigma_v_r.y() < config_.max_sigma_y &&
             sigma_v_r.z() < config_.max_sigma_z)
           return true;
+      }else{
+        ROS_INFO_STREAM_THROTTLE(0.5, kPrefix << "lsq sigma cond failed");
       }
     }
     else
     {
       return true;
     }
+  }else{
+    ROS_INFO_STREAM_THROTTLE(0.5, kPrefix << "lsq cond failed " << std::to_string(cond));
   }
 
   return false;
